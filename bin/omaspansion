@@ -1,0 +1,778 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/omaspansion"
+STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/omaspansion"
+ENTRIES_FILE="${CONFIG_DIR}/entries.json"
+SETTINGS_FILE="${CONFIG_DIR}/settings.json"
+TYPED_RUNTIME_FILE="${CONFIG_DIR}/typed-runtime.conf"
+TYPED_EXCLUSIONS_FILE="${CONFIG_DIR}/typed-excluded-programs.txt"
+TYPED_ENTRIES_FILE="${CONFIG_DIR}/typed-entries.dat"
+PLUGIN_ID="brandon.omaspansion"
+PLUGIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+ONEPASSWORD_BROKER="${PLUGIN_DIR}/bin/onepassword-broker"
+OP_CONFIG="${XDG_CONFIG_HOME:-${HOME}/.config}/op/config"
+BROKER_ERROR_FILE="${STATE_DIR}/onepassword-broker.error"
+LOCAL_SECRET_MARKER="__pending_local_secret__"
+BITWARDEN_SESSION_ATTRIBUTES=(application omaspansion provider bitwarden-session)
+
+mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+chmod 700 "$CONFIG_DIR" "$STATE_DIR"
+
+notify() {
+  command -v notify-send >/dev/null 2>&1 && notify-send "Omaspansion" "$1"
+}
+
+capture_target_window() {
+  hyprctl -j activewindow 2>/dev/null | jq -r '.address // empty' 2>/dev/null
+}
+
+valid_store_file() {
+  local path="$1"
+  jq -e '
+    .version == 2
+    and (.entries | type == "array")
+    and (.entries | length <= 1000)
+    and ([.entries[].key] | length == (unique | length))
+    and all(.entries[];
+      (.key | type == "string")
+      and (.key | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"))
+      and (.description | type == "string")
+      and (.description | length <= 512)
+      and (.category | type == "string")
+      and (.category | length > 0 and length <= 128)
+      and (.type | IN("paste", "copy", "open-url", "open-file", "onepassword-paste", "bitwarden-paste", "lastpass-paste", "protonpass-paste", "local-secret-paste"))
+      and (.value | type == "string")
+      and (.value | length > 0 and length <= 65536)
+      and (if .type == "onepassword-paste"
+        then (.value | test("^op://[^[:cntrl:]]+/[^[:cntrl:]]+/[^[:cntrl:]]+$"))
+        elif .type == "bitwarden-paste"
+        then (.value | test("^[0-9a-fA-F-]{36}$"))
+        elif .type == "lastpass-paste"
+        then (.value | test("^[0-9]+$"))
+        elif .type == "protonpass-paste"
+        then (.value | test("^pass://.+/.+/.+([^/]|[?]totp=(code|uri))$"))
+        elif .type == "local-secret-paste"
+        then (.value | test("^local-secret:[0-9a-f-]{36}$"))
+        else ((.value | split("$|$") | length) <= 2)
+      end)
+    )
+  ' "$path" >/dev/null 2>&1
+}
+
+write_store_file() {
+  local source="$1"
+  local temporary
+  temporary="$(mktemp "${CONFIG_DIR}/.entries.XXXXXX")"
+  jq '.entries |= sort_by(.key | ascii_downcase)' "$source" > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$ENTRIES_FILE"
+}
+
+removed_local_secret_ids() {
+  local old_store="$1"
+  local new_store="$2"
+  jq -nr --slurpfile old "$old_store" --slurpfile new "$new_store" '
+    ($new[0].entries | map(select(.type == "local-secret-paste") | .value)) as $kept
+    | $old[0].entries[]
+    | select(.type == "local-secret-paste")
+    | .value as $id
+    | select(($kept | index($id)) == null)
+    | $id
+  '
+}
+
+clear_local_secret_ids() {
+  local local_id
+  for local_id in "$@"; do
+    [[ "$local_id" =~ ^local-secret:[0-9a-f-]{36}$ ]] || continue
+    secret-tool clear application omaspansion id "$local_id" >/dev/null 2>&1 || true
+  done
+}
+
+valid_settings_file() {
+  local path="$1"
+  jq -e '
+    .version == 1
+    and (.enabled | type == "boolean")
+    and (.prefix | type == "string")
+    and (.prefix | test("^[^[:alnum:][:space:]]$"))
+    and (.prefix | explode | length == 1)
+    and (.prefix | explode[0] >= 33 and explode[0] <= 126)
+    and (.excludedPrograms | type == "array")
+    and (.excludedPrograms | length <= 128)
+    and ([.excludedPrograms[]] | length == (unique | length))
+    and all(.excludedPrograms[];
+      (type == "string") and (length > 0) and (length <= 255)
+    )
+  ' "$path" >/dev/null 2>&1
+}
+
+write_settings_file() {
+  local source="$1"
+  local temporary
+  temporary="$(mktemp "${CONFIG_DIR}/.settings.XXXXXX")"
+  jq '.excludedPrograms |= map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | .excludedPrograms |= unique' "$source" > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$SETTINGS_FILE"
+}
+
+ensure_settings() {
+  if [[ ! -f "$SETTINGS_FILE" ]]; then
+    printf '%s\n' '{"version":1,"enabled":true,"prefix":";","excludedPrograms":[]}' > "$SETTINGS_FILE"
+    chmod 600 "$SETTINGS_FILE"
+  fi
+
+  if ! valid_settings_file "$SETTINGS_FILE"; then
+    notify "settings.json is invalid; typed expansion was not updated."
+    return 1
+  fi
+}
+
+write_atomic() {
+  local destination="$1"
+  local temporary
+  temporary="$(mktemp "${CONFIG_DIR}/.runtime.XXXXXX")"
+  cat > "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$destination"
+}
+
+sync_typed_data() {
+  {
+    jq -r 'if .enabled then "1" else "0" end' "$SETTINGS_FILE"
+    jq -r '.prefix' "$SETTINGS_FILE"
+  } | write_atomic "$TYPED_RUNTIME_FILE"
+  jq -r '.excludedPrograms[]' "$SETTINGS_FILE" | write_atomic "$TYPED_EXCLUSIONS_FILE"
+  jq -j '
+    .entries[]
+    | select(.type == "paste" or .type == "onepassword-paste" or .type == "bitwarden-paste" or .type == "lastpass-paste" or .type == "protonpass-paste" or .type == "local-secret-paste")
+    | .key, "\u0000",
+      (if (.type | endswith("-paste")) and .type != "paste" then "\u0001secure"
+       else .value end),
+      "\u0000"
+  ' "$ENTRIES_FILE" | write_atomic "$TYPED_ENTRIES_FILE"
+}
+
+ensure_store() {
+  local temporary
+  if [[ ! -f "$ENTRIES_FILE" ]]; then
+    printf '%s\n' '{"version":2,"entries":[]}' > "$ENTRIES_FILE"
+    chmod 600 "$ENTRIES_FILE"
+  fi
+
+  if jq -e '.version == 1 and (.entries | type == "array")' "$ENTRIES_FILE" >/dev/null 2>&1; then
+    temporary="$(mktemp "${CONFIG_DIR}/.migration.XXXXXX")"
+    jq '
+      .version = 2
+      | .entries |= map(. + {
+          description: (.description // ""),
+          category: (.category // "Custom")
+        })
+    ' "$ENTRIES_FILE" > "$temporary"
+    if ! valid_store_file "$temporary"; then
+      rm -f "$temporary"
+      notify "The command catalog could not be migrated."
+      return 1
+    fi
+    write_store_file "$temporary"
+    rm -f "$temporary"
+  fi
+
+  if ! valid_store_file "$ENTRIES_FILE"; then
+    notify "entries.json is invalid; no commands were loaded."
+    return 1
+  fi
+  chmod 600 "$ENTRIES_FILE"
+  ensure_settings
+  sync_typed_data
+}
+
+save_store() {
+  local incoming payload
+  local -a removed_secret_ids=()
+  incoming="$(mktemp "${CONFIG_DIR}/.incoming.XXXXXX")"
+  IFS= read -r payload || true
+  printf '%s\n' "$payload" > "$incoming"
+  if [[ ! -s "$incoming" ]] || (( $(stat -c %s "$incoming") > 4194304 )); then
+    rm -f "$incoming"
+    printf '%s\n' "Command catalog is empty or too large." >&2
+    return 1
+  fi
+  if ! valid_store_file "$incoming"; then
+    rm -f "$incoming"
+    printf '%s\n' "Command catalog validation failed." >&2
+    return 1
+  fi
+
+  exec 8>"${STATE_DIR}/store.lock"
+  flock 8
+  mapfile -t removed_secret_ids < <(removed_local_secret_ids "$ENTRIES_FILE" "$incoming")
+  write_store_file "$incoming"
+  sync_typed_data
+  flock -u 8
+  exec 8>&-
+  clear_local_secret_ids "${removed_secret_ids[@]}"
+  rm -f "$incoming"
+}
+
+save_local_secret() {
+  local payload secret key local_id temporary
+  local -a removed_secret_ids=()
+
+  IFS= read -r payload || true
+  if [[ -z "$payload" ]] || (( ${#payload} > 4194304 )); then
+    printf '%s\n' "Local-secret request is empty or too large." >&2
+    return 1
+  fi
+  if ! printf '%s' "$payload" | jq -e --arg marker "$LOCAL_SECRET_MARKER" '
+    .version == 1
+    and (.secret | type == "string")
+    and (.secret | length > 0 and length <= 65536)
+    and (.catalog.version == 2)
+    and (.catalog.entries | type == "array")
+    and ([.catalog.entries[] | select(.type == "local-secret-paste" and .value == $marker)] | length == 1)
+  ' >/dev/null 2>&1; then
+    printf '%s\n' "Local-secret request validation failed." >&2
+    return 1
+  fi
+
+  secret="$(printf '%s' "$payload" | jq -er '.secret')"
+  local_id="local-secret:$(</proc/sys/kernel/random/uuid)"
+  temporary="$(mktemp "${CONFIG_DIR}/.local-secret-catalog.XXXXXX")"
+  printf '%s' "$payload" | jq --arg marker "$LOCAL_SECRET_MARKER" --arg localId "$local_id" '
+    .catalog
+    | (.entries[] | select(.type == "local-secret-paste" and .value == $marker) | .value) = $localId
+  ' > "$temporary"
+  unset payload
+  chmod 600 "$temporary"
+  if ! valid_store_file "$temporary"; then
+    rm -f "$temporary"
+    unset secret
+    printf '%s\n' "The resulting command catalog is invalid." >&2
+    return 1
+  fi
+  key="$(jq -er --arg localId "$local_id" '.entries[] | select(.value == $localId) | .key' "$temporary")"
+
+  if ! command -v secret-tool >/dev/null 2>&1; then
+    rm -f "$temporary"
+    unset secret
+    printf '%s\n' "secret-tool is required for local secure entries." >&2
+    return 1
+  fi
+  if ! printf '%s' "$secret" | secret-tool store \
+      --label="Omarchy Omaspansion: ${key}" \
+      application omaspansion id "$local_id"; then
+    rm -f "$temporary"
+    unset secret
+    printf '%s\n' "The local secret could not be stored in the login keyring." >&2
+    return 1
+  fi
+  unset secret
+
+  exec 8>"${STATE_DIR}/store.lock"
+  flock 8
+  mapfile -t removed_secret_ids < <(removed_local_secret_ids "$ENTRIES_FILE" "$temporary")
+  if ! write_store_file "$temporary"; then
+    flock -u 8
+    exec 8>&-
+    clear_local_secret_ids "$local_id"
+    rm -f "$temporary"
+    printf '%s\n' "The command catalog could not be saved." >&2
+    return 1
+  fi
+  sync_typed_data
+  flock -u 8
+  exec 8>&-
+  clear_local_secret_ids "${removed_secret_ids[@]}"
+  rm -f "$temporary"
+  printf '%s\n' "$local_id"
+}
+
+save_settings() {
+  local incoming payload
+  incoming="$(mktemp "${CONFIG_DIR}/.settings-incoming.XXXXXX")"
+  IFS= read -r payload || true
+  printf '%s\n' "$payload" > "$incoming"
+  if ! valid_settings_file "$incoming"; then
+    rm -f "$incoming"
+    printf '%s\n' "Typed-expansion settings validation failed." >&2
+    return 1
+  fi
+
+  exec 8>"${STATE_DIR}/store.lock"
+  flock 8
+  write_settings_file "$incoming"
+  sync_typed_data
+  flock -u 8
+  exec 8>&-
+  rm -f "$incoming"
+}
+
+import_legacy() {
+  local legacy_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/omarchy-command-palette"
+  local legacy_entries="${legacy_dir}/entries.json"
+  local legacy_settings="${legacy_dir}/settings.json"
+  local temporary local_id secret
+
+  [[ -f "$legacy_entries" ]] || {
+    printf '%s\n' "No legacy Omarchy Command Palette catalog was found." >&2
+    return 1
+  }
+  if [[ "$(jq -r '.entries | length' "$ENTRIES_FILE")" != "0" ]]; then
+    printf '%s\n' "Omaspansion already has entries; refusing to overwrite them." >&2
+    return 1
+  fi
+  valid_store_file "$legacy_entries" || {
+    printf '%s\n' "The legacy catalog is invalid or uses unsupported entry types." >&2
+    return 1
+  }
+
+  if jq -e 'any(.entries[]; .type == "local-secret-paste")' "$legacy_entries" >/dev/null; then
+    command -v secret-tool >/dev/null 2>&1 || {
+      printf '%s\n' "secret-tool is required to migrate local secrets." >&2
+      return 1
+    }
+    while IFS= read -r local_id; do
+      secret="$(secret-tool lookup application omarchy-command-palette id "$local_id")" || {
+        printf '%s\n' "Could not retrieve legacy local secret $local_id." >&2
+        return 1
+      }
+      printf '%s' "$secret" | secret-tool store \
+        --label="Omaspansion migrated local secret" \
+        application omaspansion id "$local_id" >/dev/null
+      unset secret
+    done < <(jq -r '.entries[] | select(.type == "local-secret-paste") | .value' "$legacy_entries")
+  fi
+
+  temporary="$(mktemp "${CONFIG_DIR}/.legacy-entries.XXXXXX")"
+  jq '.' "$legacy_entries" > "$temporary"
+  write_store_file "$temporary"
+  rm -f "$temporary"
+
+  if [[ -f "$legacy_settings" ]] && valid_settings_file "$legacy_settings"; then
+    temporary="$(mktemp "${CONFIG_DIR}/.legacy-settings.XXXXXX")"
+    jq '.' "$legacy_settings" > "$temporary"
+    write_settings_file "$temporary"
+    rm -f "$temporary"
+  fi
+  sync_typed_data
+  printf '%s\n' "Imported the legacy catalog and settings into Omaspansion."
+}
+
+restore_target_window() {
+  local address="$1"
+  local attempt
+  [[ -n "$address" ]] || return 1
+  hyprctl -j clients 2>/dev/null \
+    | jq -e --arg address "$address" 'any(.[]; .address == $address)' >/dev/null || return 1
+
+  sleep 0.12
+  for ((attempt = 0; attempt < 15; attempt++)); do
+    hyprctl dispatch focuswindow "address:${address}" >/dev/null 2>&1 || true
+    sleep 0.08
+    if [[ "$(capture_target_window)" == "$address" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+clipboard_backup=""
+clipboard_saved=false
+
+restore_clipboard() {
+  if [[ "$clipboard_saved" == true ]]; then
+    wl-copy < "$clipboard_backup"
+  else
+    wl-copy --clear 2>/dev/null || true
+  fi
+}
+
+cleanup_run() {
+  if [[ -n "${clipboard_backup:-}" ]]; then
+    rm -f "$clipboard_backup"
+  fi
+  if [[ -e "/proc/$$/fd/9" ]]; then
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
+  fi
+  return 0
+}
+
+rendered_value=""
+cursor_from_end=0
+
+render_value() {
+  local value="$1"
+  local marker='$|$'
+  local prefix suffix
+
+  value="${value//'{{date}}'/$(date +'%m/%d/%Y')}"
+  value="${value//'{{date_dashed_plus4h}}'/$(date -d '+14400 seconds' +'%Y-%m-%d-')}"
+  value="${value//'{{date_compact_plus4h}}'/$(date -d '+14400 seconds' +'%Y%m%d')}"
+
+  cursor_from_end=0
+  if [[ "$value" == *"$marker"* ]]; then
+    prefix="${value%%"$marker"*}"
+    suffix="${value#*"$marker"}"
+    rendered_value="${prefix}${suffix}"
+    cursor_from_end=${#suffix}
+  else
+    rendered_value="$value"
+  fi
+}
+
+ensure_onepassword_broker() {
+  local account server_pid attempt
+
+  if [[ ! -x "$ONEPASSWORD_BROKER" ]]; then
+    notify "The 1Password broker is not installed."
+    return 1
+  fi
+  if "$ONEPASSWORD_BROKER" ping >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ ! -r "$OP_CONFIG" ]]; then
+    notify "Sign in with the 1Password CLI before using a 1Password command."
+    return 1
+  fi
+  account="$(jq -er '.accounts | map(select(.accountUUID | type == "string" and length > 0)) | .[0].accountUUID' "$OP_CONFIG")" || {
+    notify "No 1Password account was found in the CLI configuration."
+    return 1
+  }
+
+  exec 7>"${STATE_DIR}/onepassword-broker-start.lock"
+  flock 7
+  if "$ONEPASSWORD_BROKER" ping >/dev/null 2>&1; then
+    flock -u 7
+    exec 7>&-
+    return 0
+  fi
+
+  : > "$BROKER_ERROR_FILE"
+  chmod 600 "$BROKER_ERROR_FILE"
+  notify "Approve Omarchy Omaspansion in 1Password."
+  setsid "$ONEPASSWORD_BROKER" serve --account "$account" </dev/null >/dev/null 2>"$BROKER_ERROR_FILE" &
+  server_pid=$!
+  for ((attempt = 0; attempt < 750; attempt++)); do
+    if "$ONEPASSWORD_BROKER" ping >/dev/null 2>&1; then
+      flock -u 7
+      exec 7>&-
+      return 0
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  flock -u 7
+  exec 7>&-
+  notify "1Password authorization failed. Unlock 1Password and try again."
+  return 1
+}
+
+run_onepassword_entry() {
+  local key="$1"
+  local target_window="$2"
+  local reference="$3"
+  local secret=""
+
+  ensure_onepassword_broker || return 1
+  if ! secret="$("$ONEPASSWORD_BROKER" resolve "$reference" 2>"$BROKER_ERROR_FILE")"; then
+    notify "1Password could not resolve '${key}'. Check its secret reference and unlock 1Password."
+    return 1
+  fi
+  if ! restore_target_window "$target_window"; then
+    unset secret
+    notify "The original popup/window closed. '${key}' was not copied or inserted."
+    return 1
+  fi
+
+  sleep 0.05
+  if ! printf '%s' "$secret" | ydotool type --key-delay=1 --key-hold=1 --file=-; then
+    unset secret
+    notify "Could not securely type '${key}'."
+    return 1
+  fi
+  unset secret
+}
+
+resolve_bitwarden() {
+  local reference="$1"
+  local session=""
+
+  command -v bw >/dev/null 2>&1 || { notify "Bitwarden CLI (bw) is not installed."; return 1; }
+  command -v secret-tool >/dev/null 2>&1 || { notify "secret-tool is required for Bitwarden sessions."; return 1; }
+  session="$(secret-tool lookup "${BITWARDEN_SESSION_ATTRIBUTES[@]}")" || {
+    notify "Bitwarden is locked. Run: omaspansion provider-login bitwarden"
+    return 1
+  }
+  BW_SESSION="$session" timeout 20s bw get password "$reference" 2>/dev/null
+  local status=$?
+  unset session
+  return "$status"
+}
+
+resolve_lastpass() {
+  local reference="$1"
+  command -v lpass >/dev/null 2>&1 || { notify "LastPass CLI (lpass) is not installed."; return 1; }
+  timeout 20s lpass show --sync=auto --password "$reference" 2>/dev/null
+}
+
+resolve_protonpass() {
+  local reference="$1"
+  command -v pass-cli >/dev/null 2>&1 || { notify "Proton Pass CLI (pass-cli) is not installed."; return 1; }
+  timeout 20s pass-cli item view "$reference" 2>/dev/null
+}
+
+run_provider_entry() {
+  local key="$1"
+  local target_window="$2"
+  local type="$3"
+  local reference="$4"
+  local secret=""
+
+  case "$type" in
+    onepassword-paste)
+      run_onepassword_entry "$key" "$target_window" "$reference"
+      return
+      ;;
+    bitwarden-paste)
+      secret="$(resolve_bitwarden "$reference")" || { notify "Bitwarden could not resolve '${key}'."; return 1; }
+      ;;
+    lastpass-paste)
+      secret="$(resolve_lastpass "$reference")" || { notify "LastPass could not resolve '${key}'. Sign in with lpass login and try again."; return 1; }
+      ;;
+    protonpass-paste)
+      secret="$(resolve_protonpass "$reference")" || { notify "Proton Pass could not resolve '${key}'. Sign in with pass-cli login and try again."; return 1; }
+      ;;
+    *)
+      notify "Unsupported secure provider for '${key}'."
+      return 1
+      ;;
+  esac
+
+  if [[ -z "$secret" || ${#secret} -gt 65536 ]]; then
+    unset secret
+    notify "The provider returned an empty or oversized value for '${key}'."
+    return 1
+  fi
+  if ! restore_target_window "$target_window"; then
+    unset secret
+    notify "The original popup/window closed. '${key}' was not copied or inserted."
+    return 1
+  fi
+  sleep 0.05
+  if ! printf '%s' "$secret" | ydotool type --key-delay=1 --key-hold=1 --file=-; then
+    unset secret
+    notify "Could not securely type '${key}'."
+    return 1
+  fi
+  unset secret
+}
+
+run_local_secret_entry() {
+  local key="$1"
+  local target_window="$2"
+  local local_id="$3"
+  local secret=""
+
+  if [[ ! "$local_id" =~ ^local-secret:[0-9a-f-]{36}$ ]]; then
+    notify "'${key}' has an invalid local-secret identifier."
+    return 1
+  fi
+  if ! command -v secret-tool >/dev/null 2>&1; then
+    notify "secret-tool is not installed."
+    return 1
+  fi
+  if ! secret="$(secret-tool lookup application omaspansion id "$local_id")"; then
+    notify "The local secret for '${key}' was not found or the keyring is locked."
+    return 1
+  fi
+  if ! restore_target_window "$target_window"; then
+    unset secret
+    notify "The original popup/window closed. '${key}' was not copied or inserted."
+    return 1
+  fi
+
+  sleep 0.05
+  if ! printf '%s' "$secret" | ydotool type --key-delay=1 --key-hold=1 --file=-; then
+    unset secret
+    notify "Could not securely type '${key}'."
+    return 1
+  fi
+  unset secret
+}
+
+run_typed_secure_entry() {
+  local key="$1"
+  local type target_window
+
+  type="$(jq -er --arg key "$key" '.entries[] | select(.key == $key) | .type' "$ENTRIES_FILE")" || {
+    notify "Secure expansion '${key}' no longer exists."
+    return 1
+  }
+  case "$type" in
+    onepassword-paste|bitwarden-paste|lastpass-paste|protonpass-paste|local-secret-paste) ;;
+    *) notify "'${key}' is no longer a secure expansion."; return 1 ;;
+  esac
+
+  target_window="$(capture_target_window)"
+  run_entry "$key" "$target_window"
+}
+
+run_entry() {
+  local key="$1"
+  local target_window="$2"
+  local type value i
+  local -a cursor_keys=()
+
+  type="$(jq -er --arg key "$key" '.entries[] | select(.key == $key) | .type' "$ENTRIES_FILE")" || {
+    notify "Command '${key}' no longer exists."
+    return 1
+  }
+  value="$(jq -er --arg key "$key" '.entries[] | select(.key == $key) | .value' "$ENTRIES_FILE")"
+
+  exec 9>"${STATE_DIR}/run.lock"
+  flock 9
+  trap cleanup_run EXIT
+
+  if [[ "$type" == "onepassword-paste" || "$type" == "bitwarden-paste" || "$type" == "lastpass-paste" || "$type" == "protonpass-paste" ]]; then
+    run_provider_entry "$key" "$target_window" "$type" "$value"
+    return
+  fi
+  if [[ "$type" == "local-secret-paste" ]]; then
+    run_local_secret_entry "$key" "$target_window" "$value"
+    return
+  fi
+
+  render_value "$value"
+  clipboard_backup="$(mktemp "${STATE_DIR}/clipboard.XXXXXX")"
+  if wl-paste > "$clipboard_backup" 2>/dev/null; then
+    clipboard_saved=true
+  fi
+  case "$type" in
+    open-url|open-file)
+      restore_clipboard
+      (
+        exec 9>&-
+        xdg-open "$rendered_value" >/dev/null 2>&1
+      ) &
+      ;;
+    copy)
+      printf '%s' "$rendered_value" | wl-copy
+      notify "Copied '${key}'."
+      ;;
+    paste)
+      printf '%s' "$rendered_value" | wl-copy
+      if ! restore_target_window "$target_window"; then
+        notify "The original popup/window closed. '${key}' is copied; reopen the field and paste."
+        return 0
+      fi
+      sleep 0.05
+      if ! wtype -M ctrl -M shift -k v -m shift -m ctrl; then
+        restore_clipboard
+        return 1
+      fi
+
+      if ((cursor_from_end > 0)); then
+        sleep 0.08
+        for ((i = 0; i < cursor_from_end; i++)); do
+          cursor_keys+=(-k Left)
+        done
+        if ! wtype "${cursor_keys[@]}"; then
+          notify "Inserted '${key}', but could not move to its cursor marker."
+        fi
+      fi
+
+      (
+        exec 9>&-
+        sleep 1
+        restore_clipboard
+        rm -f "$clipboard_backup"
+      ) &
+      clipboard_backup=""
+      ;;
+  esac
+}
+
+mode="${1:-launch}"
+ensure_store
+
+provider_login() {
+  local provider="${1:-}"
+  local session=""
+  case "$provider" in
+    bitwarden)
+      command -v bw >/dev/null 2>&1 || { printf '%s\n' "Bitwarden CLI (bw) is not installed." >&2; return 1; }
+      command -v secret-tool >/dev/null 2>&1 || { printf '%s\n' "secret-tool is required." >&2; return 1; }
+      session="$(bw unlock --raw)" || return 1
+      [[ -n "$session" ]] || { printf '%s\n' "Bitwarden did not return a session." >&2; return 1; }
+      printf '%s' "$session" | secret-tool store --label="Omaspansion: Bitwarden session" "${BITWARDEN_SESSION_ATTRIBUTES[@]}"
+      unset session
+      printf '%s\n' "Bitwarden is unlocked for Omaspansion. Use 'omaspansion provider-logout bitwarden' to revoke it."
+      ;;
+    *) printf '%s\n' "usage: omaspansion provider-login bitwarden" >&2; return 2 ;;
+  esac
+}
+
+provider_logout() {
+  local provider="${1:-}"
+  case "$provider" in
+    bitwarden)
+      secret-tool clear "${BITWARDEN_SESSION_ATTRIBUTES[@]}" >/dev/null 2>&1 || true
+      command -v bw >/dev/null 2>&1 && bw lock >/dev/null 2>&1 || true
+      printf '%s\n' "Bitwarden access was removed from Omaspansion."
+      ;;
+    *) printf '%s\n' "usage: omaspansion provider-logout bitwarden" >&2; return 2 ;;
+  esac
+}
+
+case "$mode" in
+  launch)
+    target_window="$(capture_target_window)"
+    payload="$(jq -cn --arg targetWindow "$target_window" '{targetWindow:$targetWindow}')"
+    omarchy-shell shell toggle "$PLUGIN_ID" "$payload" >/dev/null
+    ;;
+  run)
+    [[ $# -eq 3 ]] || { printf '%s\n' "usage: omaspansion run KEY TARGET_WINDOW" >&2; exit 2; }
+    run_entry "$2" "$3"
+    ;;
+  run-typed-secure)
+    [[ $# -eq 2 ]] || { printf '%s\n' "usage: omaspansion run-typed-secure KEY" >&2; exit 2; }
+    run_typed_secure_entry "$2"
+    ;;
+  save)
+    [[ $# -eq 1 ]] || { printf '%s\n' "usage: omaspansion save < entries.json" >&2; exit 2; }
+    save_store
+    ;;
+  save-local-secret)
+    [[ $# -eq 1 ]] || { printf '%s\n' "usage: omaspansion save-local-secret < request.json" >&2; exit 2; }
+    save_local_secret
+    ;;
+  save-settings)
+    [[ $# -eq 1 ]] || { printf '%s\n' "usage: omaspansion save-settings < settings.json" >&2; exit 2; }
+    save_settings
+    ;;
+  provider-login)
+    [[ $# -eq 2 ]] || { printf '%s\n' "usage: omaspansion provider-login PROVIDER" >&2; exit 2; }
+    provider_login "$2"
+    ;;
+  provider-logout)
+    [[ $# -eq 2 ]] || { printf '%s\n' "usage: omaspansion provider-logout PROVIDER" >&2; exit 2; }
+    provider_logout "$2"
+    ;;
+  import-legacy)
+    [[ $# -eq 1 ]] || { printf '%s\n' "usage: omaspansion import-legacy" >&2; exit 2; }
+    import_legacy
+    ;;
+  migrate)
+    ;;
+  *)
+    printf '%s\n' "usage: omaspansion [launch|run KEY TARGET_WINDOW|run-typed-secure KEY|save|save-local-secret|save-settings|provider-login PROVIDER|provider-logout PROVIDER|import-legacy|migrate]" >&2
+    exit 2
+    ;;
+esac

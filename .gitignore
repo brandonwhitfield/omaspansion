@@ -1,0 +1,5 @@
+/build/
+/bin/onepassword-broker
+*.bak
+*.swp
+*~

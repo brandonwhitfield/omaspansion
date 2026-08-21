@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+purge_data=false
+if [[ "${1:-}" == "--purge-data" ]]; then
+  purge_data=true
+elif (( $# > 0 )); then
+  printf '%s\n' "usage: ./uninstall [--purge-data]" >&2
+  exit 2
+fi
+
+DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/fcitx5/addon"
+CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/omaspansion"
+STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/omaspansion"
+
+rm -f -- \
+  "${HOME}/.local/lib/fcitx5/omaspansionexpander.so" \
+  "$DATA_DIR/omaspansion.conf"
+
+if [[ -f "${HOME}/.local/bin/omaspansion" ]] && \
+   grep -q 'brandon.omaspansion/bin/omaspansion' "${HOME}/.local/bin/omaspansion"; then
+  rm -f -- "${HOME}/.local/bin/omaspansion"
+fi
+
+if command -v secret-tool >/dev/null 2>&1; then
+  secret-tool clear application omaspansion provider bitwarden-session >/dev/null 2>&1 || true
+fi
+
+if [[ "$purge_data" == true ]]; then
+  printf '%s\n' "Removing Omaspansion configuration and local-keyring entries."
+  if [[ -f "$CONFIG_DIR/entries.json" ]] && command -v jq >/dev/null 2>&1 && command -v secret-tool >/dev/null 2>&1; then
+    while IFS= read -r local_id; do
+      [[ "$local_id" =~ ^local-secret:[0-9a-f-]{36}$ ]] || continue
+      secret-tool clear application omaspansion id "$local_id" >/dev/null 2>&1 || true
+    done < <(jq -r '.entries[]? | select(.type == "local-secret-paste") | .value' "$CONFIG_DIR/entries.json")
+  fi
+  rm -rf -- "$CONFIG_DIR" "$STATE_DIR"
+else
+  printf '%s\n' "Your entries remain in $CONFIG_DIR"
+fi
+
+printf '%s\n' "Remove the Alt+E binding manually, restart Fcitx with 'fcitx5 -rd', then run:"
+printf '%s\n' "  omarchy plugin remove brandon.omaspansion"

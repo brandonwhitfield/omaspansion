@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+PLUGIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+EXPECTED_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/omarchy/plugins/brandon.omaspansion"
+BUILD_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/omaspansion/fcitx5-build"
+DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/fcitx5/addon"
+LIB_DIR="${HOME}/.local/lib/fcitx5"
+BIN_DIR="${HOME}/.local/bin"
+
+if [[ "$PLUGIN_DIR" != "$EXPECTED_DIR" ]]; then
+  printf '%s\n' "Install the plugin with Omarchy before running setup:" >&2
+  printf '  omarchy plugin add <git-url> --enable\n' >&2
+  exit 1
+fi
+
+for command in cmake g++ jq wl-copy wl-paste wtype ydotool; do
+  command -v "$command" >/dev/null 2>&1 || {
+    printf '%s\n' "Missing required command: $command" >&2
+    exit 1
+  }
+done
+
+cmake -S "$PLUGIN_DIR/fcitx5" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$BUILD_DIR" --parallel
+
+mkdir -p "$DATA_DIR" "$LIB_DIR" "$BIN_DIR"
+install -m 0755 "$BUILD_DIR/omaspansionexpander.so" "$LIB_DIR/omaspansionexpander.so"
+sed "s|^Library=.*|Library=${LIB_DIR}/omaspansionexpander|" \
+  "$PLUGIN_DIR/fcitx5/omaspansion.conf" > "$DATA_DIR/omaspansion.conf"
+chmod 0644 "$DATA_DIR/omaspansion.conf"
+install -m 0755 "$PLUGIN_DIR/scripts/omaspansion-wrapper" "$BIN_DIR/omaspansion"
+
+if command -v go >/dev/null 2>&1; then
+  (cd "$PLUGIN_DIR/onepassword-broker" && go build -trimpath -o "$PLUGIN_DIR/bin/onepassword-broker" .)
+  chmod 0755 "$PLUGIN_DIR/bin/onepassword-broker"
+  printf '%s\n' "Built optional 1Password integration."
+else
+  printf '%s\n' "Go is not installed; skipping the optional 1Password broker."
+fi
+
+"$PLUGIN_DIR/bin/omaspansion" migrate
+
+printf '\n%s\n' "Omaspansion setup is complete."
+printf '%s\n' "Restart Fcitx once: fcitx5 -rd"
+printf '%s\n' "Add this to ~/.config/hypr/bindings.lua for Alt+E:"
+printf '%s\n' '  hl.unbind("ALT + E")'
+printf '%s\n' '  o.bind("ALT + E", "Omaspansion", "$HOME/.local/bin/omaspansion")'

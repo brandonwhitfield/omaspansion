@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "brandon.omaspansion",
+  "name": "Omaspansion",
+  "version": "0.1.0-beta.1",
+  "author": "Brandon Whitfield",
+  "license": "MIT",
+  "description": "A configurable Omarchy text expander with optional password-manager-backed secrets.",
+  "kinds": ["overlay"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Overlay.qml"
+  }
+}
