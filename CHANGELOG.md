@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0-beta.2
+
+- Document the safe cutover from the private Command Palette so its legacy
+  Fcitx addon cannot expand the same trigger alongside Omaspansion.
+
 ## 0.1.0-beta.1
 
 - Initial GitHub beta.

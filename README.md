@@ -41,14 +41,27 @@ hl.unbind("ALT + E")
 o.bind("ALT + E", "Omaspansion", "$HOME/.local/bin/omaspansion")
 ```
 
-Existing users of the private Omarchy Command Palette can import its catalog,
-settings, and local-keyring records once, before adding new Omaspansion entries:
+## Migrate from the private Command Palette
+
+The two Fcitx addons must not remain enabled with the same prefix. Use this
+cutover sequence:
+
+1. Open the old Command Palette manager, turn off typed expansion, and save.
+2. Install Omaspansion and run its setup as described above.
+3. Import the old catalog, settings, and local-keyring records:
 
 ```bash
 omaspansion import-legacy
 ```
 
-The command refuses to overwrite a non-empty Omaspansion catalog.
+4. Change the `Alt+E` binding to `$HOME/.local/bin/omaspansion`.
+5. Disable the old overlay with
+   `omarchy plugin disable brandon.command-palette`.
+6. Restart Fcitx once with `fcitx5 -rd`.
+
+The import command refuses to overwrite a non-empty Omaspansion catalog. It
+does not delete or modify the legacy catalog, so the old plugin remains a
+fallback until you deliberately remove it.
 
 Required runtime/build tools are Bash, jq, wl-clipboard, wtype, ydotool,
 Fcitx 5 development files, CMake, and a C++ compiler. `secret-tool` is required

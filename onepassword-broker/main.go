@@ -19,7 +19,7 @@ import (
 
 const (
 	integrationName    = "Omaspansion"
-	integrationVersion = "v0.1.0-beta.1"
+	integrationVersion = "v0.1.0-beta.2"
 	idleTimeout        = 9 * time.Minute
 	requestTimeout     = 75 * time.Second
 )
