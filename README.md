@@ -39,6 +39,17 @@ expansions, local-keyring entries, Bitwarden, LastPass, and Proton Pass do not
 use Go. If Go is unavailable, setup skips the broker and completes normally.
 You can install Go later and rerun `install` to add 1Password support.
 
+On Omarchy, install Go and build the optional broker with:
+
+```bash
+omarchy pkg add go
+go version
+~/.config/omarchy/plugins/brandon.omaspansion/install
+```
+
+The final command reruns Omaspansion setup; existing entries and settings are
+preserved.
+
 ### Choose a launcher binding
 
 Omaspansion does not require `Alt+E`; you can use any Hyprland binding you
