@@ -34,12 +34,32 @@ Setup checks the required commands, builds the user-local Fcitx addon, and
 builds the optional 1Password broker when Go is available. It does not install
 system packages or modify your Hyprland configuration.
 
-Add the launcher binding to `~/.config/hypr/bindings.lua`:
+Go is optional and is used only to compile the 1Password SDK broker. Ordinary
+expansions, local-keyring entries, Bitwarden, LastPass, and Proton Pass do not
+use Go. If Go is unavailable, setup skips the broker and completes normally.
+You can install Go later and rerun `install` to add 1Password support.
+
+### Choose a launcher binding
+
+Omaspansion does not require `Alt+E`; you can use any Hyprland binding you
+prefer. Check the current bindings first:
+
+```bash
+omarchy menu keybindings --print
+```
+
+Then add your choice to `~/.config/hypr/bindings.lua`. If that combination is
+already assigned, call `hl.unbind(...)` before replacing it. For example, use
+this only after confirming what currently owns `Alt+E`:
 
 ```lua
 hl.unbind("ALT + E")
 o.bind("ALT + E", "Omaspansion", "$HOME/.local/bin/omaspansion")
 ```
+
+If your chosen combination is unbound, add only the `o.bind(...)` line with
+that combination. Hyprland reloads the Lua configuration automatically; verify
+the result with `hyprctl reload` followed by `hyprctl configerrors`.
 
 ## Migrate from the private Command Palette
 
@@ -88,7 +108,8 @@ ambiguous and may reveal organizational information in the local catalog.
 
 Install and sign in to the 1Password desktop app and CLI. The first expansion
 starts a user-only broker and asks the desktop app to authorize Omaspansion.
-The broker exits after nine minutes of inactivity.
+The broker exits after nine minutes of inactivity. This is the only provider
+integration that requires Go, because setup compiles its SDK broker locally.
 
 ### Bitwarden
 
