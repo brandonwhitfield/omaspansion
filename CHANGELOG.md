@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.0-beta.3
+
+- Add a validated 1–120 minute 1Password broker idle timeout to Settings while
+  preserving the existing nine-minute default.
+
 ## 0.1.0-beta.2
 
 - Document the safe cutover from the private Command Palette so its legacy

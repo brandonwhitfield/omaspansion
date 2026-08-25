@@ -62,6 +62,24 @@ func TestBrokerRejectsInvalidReferenceWithoutCallingResolver(t *testing.T) {
 	}
 }
 
+func TestServeFlagsIdleTimeout(t *testing.T) {
+	account, idle, err := serveFlags([]string{"--account", "example-account"})
+	if err != nil || account != "example-account" || idle != 9*time.Minute {
+		t.Fatalf("unexpected defaults: account=%q idle=%s err=%v", account, idle, err)
+	}
+
+	account, idle, err = serveFlags([]string{"--account", "example-account", "--idle-minutes", "60"})
+	if err != nil || account != "example-account" || idle != 60*time.Minute {
+		t.Fatalf("unexpected custom timeout: account=%q idle=%s err=%v", account, idle, err)
+	}
+
+	for _, value := range []string{"0", "121", "1.5", "not-a-number"} {
+		if _, _, err := serveFlags([]string{"--account", "example-account", "--idle-minutes", value}); err == nil {
+			t.Fatalf("invalid idle timeout was accepted: %q", value)
+		}
+	}
+}
+
 func waitForSocket(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

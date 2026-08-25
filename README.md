@@ -119,8 +119,10 @@ ambiguous and may reveal organizational information in the local catalog.
 
 Install and sign in to the 1Password desktop app and CLI. The first expansion
 starts a user-only broker and asks the desktop app to authorize Omaspansion.
-The broker exits after nine minutes of inactivity. This is the only provider
-integration that requires Go, because setup compiles its SDK broker locally.
+The broker exits after a configurable idle period, measured from its most
+recent request. The default is nine minutes and Settings accepts 1–120 minutes.
+This is the only provider integration that requires Go, because setup compiles
+its SDK broker locally.
 
 ### Bitwarden
 
@@ -163,7 +165,8 @@ are preferable to names.
 ## Data and security model
 
 - Catalog: `~/.config/omaspansion/entries.json`, mode `0600`.
-- Settings: `~/.config/omaspansion/settings.json`, mode `0600`.
+- Settings: `~/.config/omaspansion/settings.json`, mode `0600`. This includes
+  typed expansion controls and the 1Password broker idle timeout.
 - The catalog stores ordinary expansion text and provider references. It never
   stores resolved password-manager values.
 - Secure values are resolved only after activation and sent directly to

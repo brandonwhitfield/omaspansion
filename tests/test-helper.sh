@@ -14,7 +14,7 @@ HELPER="$ROOT/bin/omaspansion"
 "$HELPER" migrate
 
 jq -e '.version == 2 and .entries == []' "$XDG_CONFIG_HOME/omaspansion/entries.json" >/dev/null
-jq -e '.version == 1 and .prefix == ";" and .excludedPrograms == []' "$XDG_CONFIG_HOME/omaspansion/settings.json" >/dev/null
+jq -e '.version == 1 and .prefix == ";" and .excludedPrograms == [] and .onePasswordBrokerIdleMinutes == 9' "$XDG_CONFIG_HOME/omaspansion/settings.json" >/dev/null
 [[ "$(stat -c %a "$XDG_CONFIG_HOME/omaspansion/entries.json")" == "600" ]]
 
 valid_catalog='{
@@ -47,6 +47,17 @@ fi
 
 jq -e '.entries | length == 4' "$XDG_CONFIG_HOME/omaspansion/entries.json" >/dev/null
 
+printf '%s\n' '{"version":1,"enabled":true,"prefix":";","excludedPrograms":[],"onePasswordBrokerIdleMinutes":60}' \
+  | "$HELPER" save-settings
+jq -e '.onePasswordBrokerIdleMinutes == 60' "$XDG_CONFIG_HOME/omaspansion/settings.json" >/dev/null
+for invalid_timeout in 0 121 1.5; do
+  if printf '%s\n' "{\"version\":1,\"enabled\":true,\"prefix\":\";\",\"excludedPrograms\":[],\"onePasswordBrokerIdleMinutes\":${invalid_timeout}}" \
+    | "$HELPER" save-settings >/dev/null 2>&1; then
+    printf '%s\n' "invalid 1Password timeout was accepted: ${invalid_timeout}" >&2
+    exit 1
+  fi
+done
+
 export HOME="$TEST_ROOT/legacy-home"
 export XDG_CONFIG_HOME="$TEST_ROOT/legacy-config"
 export XDG_STATE_HOME="$TEST_ROOT/legacy-state"
@@ -58,7 +69,7 @@ printf '%s\n' '{"version":1,"enabled":true,"prefix":"!","excludedPrograms":["exa
 "$HELPER" migrate
 "$HELPER" import-legacy >/dev/null
 jq -e '.entries[0].key == "legacy"' "$XDG_CONFIG_HOME/omaspansion/entries.json" >/dev/null
-jq -e '.prefix == "!" and .excludedPrograms == ["example.app"]' "$XDG_CONFIG_HOME/omaspansion/settings.json" >/dev/null
+jq -e '.prefix == "!" and .excludedPrograms == ["example.app"] and .onePasswordBrokerIdleMinutes == 9' "$XDG_CONFIG_HOME/omaspansion/settings.json" >/dev/null
 if "$HELPER" import-legacy >/dev/null 2>&1; then
   printf '%s\n' "legacy import overwrote a non-empty catalog" >&2
   exit 1

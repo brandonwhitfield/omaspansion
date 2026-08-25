@@ -17,7 +17,8 @@ as part of the same trusted desktop-user boundary.
 ## Provider boundaries
 
 - 1Password uses its desktop-app SDK authorization and a mode-`0600` local Unix
-  socket. Authorization behavior is controlled by 1Password.
+  socket. Authorization behavior is controlled by 1Password. The broker idle
+  timeout defaults to nine minutes and is constrained to 1–120 minutes.
 - Bitwarden requires a decryption session key. Omaspansion stores that key in
   the desktop login keyring and passes it only in the `bw` child environment.
 - LastPass relies on the `lpass` cache and agent. While unlocked, other

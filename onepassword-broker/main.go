@@ -19,8 +19,10 @@ import (
 
 const (
 	integrationName    = "Omaspansion"
-	integrationVersion = "v0.1.0-beta.2"
-	idleTimeout        = 9 * time.Minute
+	integrationVersion = "v0.1.0-beta.3"
+	defaultIdleMinutes = 9
+	minimumIdleMinutes = 1
+	maximumIdleMinutes = 120
 	requestTimeout     = 75 * time.Second
 )
 
@@ -66,7 +68,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: onepassword-broker authorize|serve --account ACCOUNT | ping | resolve OP_REFERENCE")
+	fmt.Fprintln(os.Stderr, "usage: onepassword-broker authorize --account ACCOUNT | serve --account ACCOUNT [--idle-minutes 1..120] | ping | resolve OP_REFERENCE")
 	os.Exit(2)
 }
 
@@ -78,6 +80,18 @@ func accountFlag(command string, args []string) (string, error) {
 		return "", fmt.Errorf("usage: onepassword-broker %s --account ACCOUNT", command)
 	}
 	return *account, nil
+}
+
+func serveFlags(args []string) (string, time.Duration, error) {
+	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	account := flags.String("account", "", "1Password account name or UUID")
+	idleMinutes := flags.Int("idle-minutes", defaultIdleMinutes, "broker idle timeout in minutes")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *account == "" ||
+		*idleMinutes < minimumIdleMinutes || *idleMinutes > maximumIdleMinutes {
+		return "", 0, errors.New("usage: onepassword-broker serve --account ACCOUNT [--idle-minutes 1..120]")
+	}
+	return *account, time.Duration(*idleMinutes) * time.Minute, nil
 }
 
 func newClient(ctx context.Context, account string) (*onepassword.Client, error) {
@@ -107,7 +121,7 @@ func authorize(args []string) error {
 }
 
 func serve(args []string) error {
-	account, err := accountFlag("serve", args)
+	account, idleTimeout, err := serveFlags(args)
 	if err != nil {
 		return err
 	}

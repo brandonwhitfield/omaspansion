@@ -106,6 +106,9 @@ valid_settings_file() {
     and all(.excludedPrograms[];
       (type == "string") and (length > 0) and (length <= 255)
     )
+    and ((.onePasswordBrokerIdleMinutes // 9) |
+      (type == "number") and (floor == .) and (. >= 1) and (. <= 120)
+    )
   ' "$path" >/dev/null 2>&1
 }
 
@@ -113,19 +116,23 @@ write_settings_file() {
   local source="$1"
   local temporary
   temporary="$(mktemp "${CONFIG_DIR}/.settings.XXXXXX")"
-  jq '.excludedPrograms |= map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | .excludedPrograms |= unique' "$source" > "$temporary"
+  jq '
+    .onePasswordBrokerIdleMinutes = (.onePasswordBrokerIdleMinutes // 9)
+    | .excludedPrograms |= map(gsub("^[[:space:]]+|[[:space:]]+$"; ""))
+    | .excludedPrograms |= unique
+  ' "$source" > "$temporary"
   chmod 600 "$temporary"
   mv "$temporary" "$SETTINGS_FILE"
 }
 
 ensure_settings() {
   if [[ ! -f "$SETTINGS_FILE" ]]; then
-    printf '%s\n' '{"version":1,"enabled":true,"prefix":";","excludedPrograms":[]}' > "$SETTINGS_FILE"
+    printf '%s\n' '{"version":1,"enabled":true,"prefix":";","excludedPrograms":[],"onePasswordBrokerIdleMinutes":9}' > "$SETTINGS_FILE"
     chmod 600 "$SETTINGS_FILE"
   fi
 
   if ! valid_settings_file "$SETTINGS_FILE"; then
-    notify "settings.json is invalid; typed expansion was not updated."
+    notify "settings.json is invalid; Omaspansion settings were not updated."
     return 1
   fi
 }
@@ -297,7 +304,7 @@ save_settings() {
   printf '%s\n' "$payload" > "$incoming"
   if ! valid_settings_file "$incoming"; then
     rm -f "$incoming"
-    printf '%s\n' "Typed-expansion settings validation failed." >&2
+    printf '%s\n' "Settings validation failed." >&2
     return 1
   fi
 
@@ -425,7 +432,7 @@ render_value() {
 }
 
 ensure_onepassword_broker() {
-  local account server_pid attempt
+  local account server_pid attempt idle_minutes
 
   if [[ ! -x "$ONEPASSWORD_BROKER" ]]; then
     notify "The 1Password broker is not installed."
@@ -442,6 +449,13 @@ ensure_onepassword_broker() {
     notify "No 1Password account was found in the CLI configuration."
     return 1
   }
+  idle_minutes="$(jq -er '
+    (.onePasswordBrokerIdleMinutes // 9)
+    | select(type == "number" and floor == . and . >= 1 and . <= 120)
+  ' "$SETTINGS_FILE")" || {
+    notify "The 1Password broker timeout setting is invalid."
+    return 1
+  }
 
   exec 7>"${STATE_DIR}/onepassword-broker-start.lock"
   flock 7
@@ -454,7 +468,7 @@ ensure_onepassword_broker() {
   : > "$BROKER_ERROR_FILE"
   chmod 600 "$BROKER_ERROR_FILE"
   notify "Approve Omarchy Omaspansion in 1Password."
-  setsid "$ONEPASSWORD_BROKER" serve --account "$account" </dev/null >/dev/null 2>"$BROKER_ERROR_FILE" &
+  setsid "$ONEPASSWORD_BROKER" serve --account "$account" --idle-minutes "$idle_minutes" </dev/null >/dev/null 2>"$BROKER_ERROR_FILE" &
   server_pid=$!
   for ((attempt = 0; attempt < 750; attempt++)); do
     if "$ONEPASSWORD_BROKER" ping >/dev/null 2>&1; then

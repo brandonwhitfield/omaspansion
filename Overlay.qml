@@ -30,6 +30,7 @@ Item {
   property bool typedEnabled: true
   property string typedPrefix: ";"
   property string excludedProgramsText: ""
+  property string onePasswordBrokerIdleMinutes: "9"
 
   property string editorOriginalKey: ""
   property string editorOriginalType: ""
@@ -216,11 +217,15 @@ Item {
       var parsed = JSON.parse(String(raw || ""))
       if (!parsed || parsed.version !== 1 || typeof parsed.enabled !== "boolean" ||
           typeof parsed.prefix !== "string" || !Array.isArray(parsed.excludedPrograms)) throw new Error("Unsupported settings")
+      var idleMinutes = parsed.onePasswordBrokerIdleMinutes === undefined ? 9 : parsed.onePasswordBrokerIdleMinutes
+      if (typeof idleMinutes !== "number" || Math.floor(idleMinutes) !== idleMinutes || idleMinutes < 1 || idleMinutes > 120)
+        throw new Error("Unsupported 1Password broker timeout")
       typedEnabled = parsed.enabled
       typedPrefix = parsed.prefix
       excludedProgramsText = parsed.excludedPrograms.join("\n")
+      onePasswordBrokerIdleMinutes = String(idleMinutes)
     } catch (e) {
-      statusText = "Could not load typed-expansion settings."
+      statusText = "Could not load settings."
       statusError = true
     }
   }
@@ -236,11 +241,22 @@ Item {
     var excluded = excludedProgramsText.split(/\r?\n/).map(function(value) { return value.trim() }).filter(function(value) { return value.length > 0 })
     var uniqueExcluded = []
     for (var i = 0; i < excluded.length; i++) if (uniqueExcluded.indexOf(excluded[i]) === -1) uniqueExcluded.push(excluded[i])
-    saveSettingsProc.payload = JSON.stringify({ version: 1, enabled: typedEnabled, prefix: prefix, excludedPrograms: uniqueExcluded })
+    if (!/^[0-9]+$/.test(onePasswordBrokerIdleMinutes)) {
+      statusText = "The 1Password idle timeout must be a whole number from 1 to 120 minutes."
+      statusError = true
+      return
+    }
+    var idleMinutes = Number(onePasswordBrokerIdleMinutes)
+    if (idleMinutes < 1 || idleMinutes > 120) {
+      statusText = "The 1Password idle timeout must be from 1 to 120 minutes."
+      statusError = true
+      return
+    }
+    saveSettingsProc.payload = JSON.stringify({ version: 1, enabled: typedEnabled, prefix: prefix, excludedPrograms: uniqueExcluded, onePasswordBrokerIdleMinutes: idleMinutes })
     saveSettingsProc.errorText = ""
     saveSettingsProc.command = [helperPath, "save-settings"]
     saveSettingsProc.running = true
-    statusText = "Saving typed-expansion settings…"
+    statusText = "Saving settings…"
     statusError = false
   }
 
@@ -524,11 +540,11 @@ Item {
     onStarted: write(payload + "\n")
     onExited: function(exitCode) {
       if (exitCode === 0) {
-        root.statusText = "Typed expansion saved. New triggers apply immediately."
+        root.statusText = "Settings saved. New triggers and broker sessions use them immediately."
         root.statusError = false
         settingsFile.reload()
       } else {
-        root.statusText = errorText || "Could not save typed-expansion settings."
+        root.statusText = errorText || "Could not save settings."
         root.statusError = true
       }
       payload = ""
@@ -1083,8 +1099,36 @@ Item {
                       }
                     }
 
+                    Text {
+                      text: "1Password"
+                      color: root.foreground
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.title
+                      font.bold: true
+                    }
+                    Text {
+                      width: parent.width
+                      text: "Keep the authorized broker alive for this many minutes after its most recent request. Longer sessions reduce prompts but extend local access."
+                      color: root.foreground
+                      opacity: 0.62
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.Wrap
+                    }
+                    Text { text: "Idle timeout in minutes (1–120)"; color: root.foreground; opacity: 0.72; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
+                    TextField {
+                      id: onePasswordIdleMinutesField
+                      width: parent.width
+                      text: root.onePasswordBrokerIdleMinutes
+                      placeholderText: "9"
+                      foreground: root.foreground
+                      accent: root.accent
+                      maximumLength: 3
+                      onTextChanged: root.onePasswordBrokerIdleMinutes = text
+                    }
+
                     Button {
-                      text: saveSettingsProc.running ? "Saving…" : "Save Typed Expansion"
+                      text: saveSettingsProc.running ? "Saving…" : "Save Settings"
                       bordered: true
                       enabled: !saveSettingsProc.running
                       onClicked: root.saveTypedSettings()
