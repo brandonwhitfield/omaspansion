@@ -19,7 +19,7 @@ import (
 
 const (
 	integrationName    = "Omaspansion"
-	integrationVersion = "v0.1.0-beta.3"
+	integrationVersion = "v0.1.0-beta.4"
 	defaultIdleMinutes = 9
 	minimumIdleMinutes = 1
 	maximumIdleMinutes = 120

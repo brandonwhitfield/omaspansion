@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-beta.4
+
+- Keep tracking a mistyped trigger until whitespace or another reset boundary,
+  allowing Backspace corrections to return to a valid expansion key.
+- Document the Chromium Wayland IME flags required for consistent Fcitx event
+  delivery in extension and other embedded text fields.
+
 ## 0.1.0-beta.3
 
 - Add a validated 1–120 minute 1Password broker idle timeout to Settings while

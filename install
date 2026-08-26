@@ -42,6 +42,16 @@ fi
 
 "$PLUGIN_DIR/bin/omaspansion" migrate
 
+CHROMIUM_FLAGS="${XDG_CONFIG_HOME:-${HOME}/.config}/chromium-flags.conf"
+if command -v chromium >/dev/null 2>&1 && [[ -f "$CHROMIUM_FLAGS" ]] \
+  && grep -qx -- '--ozone-platform=wayland' "$CHROMIUM_FLAGS" \
+  && ! grep -qx -- '--enable-wayland-ime' "$CHROMIUM_FLAGS"; then
+  printf '\n%s\n' "Chromium is using native Wayland without its IME bridge."
+  printf '%s\n' "Add --enable-wayland-ime and --wayland-text-input-version=3 to:"
+  printf '  %s\n' "$CHROMIUM_FLAGS"
+  printf '%s\n' "Then close every Chromium window and reopen it."
+fi
+
 printf '\n%s\n' "Omaspansion setup is complete."
 printf '%s\n' "Restart Fcitx once: fcitx5 -rd"
 printf '%s\n' "Add this to ~/.config/hypr/bindings.lua for Alt+E:"

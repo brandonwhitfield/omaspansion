@@ -13,6 +13,8 @@ placing it on the clipboard.
 - Press `Alt+E` to search, run, create, edit, and delete expansions.
 - Type a configurable punctuation prefix (default `;`) followed by an entry key
   to expand it immediately, without Space or Enter.
+- Correct a mistyped key with Backspace without retyping the prefix or the
+  entire key; tracking ends at whitespace and normal input boundaries.
 - Put `$|$` once in ordinary paste text to set the final cursor position.
 - Exclude applications from typed expansion by application ID.
 - Store local secure values in the desktop login keyring.
@@ -71,6 +73,22 @@ o.bind("ALT + E", "Omaspansion", "$HOME/.local/bin/omaspansion")
 If your chosen combination is unbound, add only the `o.bind(...)` line with
 that combination. Hyprland reloads the Lua configuration automatically; verify
 the result with `hyprctl reload` followed by `hyprctl configerrors`.
+
+### Chromium extension fields
+
+Typed expansion depends on the application sending keystrokes through Fcitx.
+For native-Wayland Chromium, make sure `~/.config/chromium-flags.conf` contains:
+
+```text
+--ozone-platform=wayland
+--enable-wayland-ime
+--wayland-text-input-version=3
+```
+
+Close every Chromium window and reopen it after changing flags. If a specific
+extension deliberately disables its input-method context, Fcitx cannot observe
+that field; run Chromium through XWayland with `GTK_IM_MODULE=fcitx` as the
+compatibility fallback for that browser session.
 
 ## Migrate from the private Command Palette
 
@@ -202,6 +220,7 @@ bash -n bin/omaspansion install uninstall scripts/omaspansion-wrapper
 ./tests/test-providers.sh
 cmake -S fcitx5 -B build/fcitx5 -DCMAKE_BUILD_TYPE=Release
 cmake --build build/fcitx5 --parallel
+ctest --test-dir build/fcitx5 --output-on-failure
 (cd onepassword-broker && go test ./...)
 ```
 

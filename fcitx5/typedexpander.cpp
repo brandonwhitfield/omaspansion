@@ -28,18 +28,18 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "candidatetracker.h"
+
 namespace {
 
 constexpr const char *secureMarker = "\x01secure";
 
 struct ExpansionState : public fcitx::InputContextProperty {
-    bool active = false;
-    std::string candidate;
+    omaspansion::CandidateTracker tracker;
     fcitx::KeySym suppressedRelease = FcitxKey_None;
 
     void reset() {
-        active = false;
-        candidate.clear();
+        tracker.reset();
     }
 };
 
@@ -259,13 +259,6 @@ private:
                            });
     }
 
-    static bool hasPrefix(const RuntimeConfig &config, const std::string &candidate) {
-        return std::any_of(config.entries.begin(), config.entries.end(),
-                           [&candidate](const auto &entry) {
-                               return entry.first.compare(0, candidate.size(), candidate) == 0;
-                           });
-    }
-
     static bool printableAscii(const fcitx::Key &key, char &character) {
         const auto blocked = fcitx::KeyStates{fcitx::KeyState::Ctrl} |
                              fcitx::KeyState::Alt | fcitx::KeyState::Super |
@@ -327,13 +320,7 @@ private:
         }
 
         if (event.key().sym() == FcitxKey_BackSpace) {
-            if (state->active) {
-                if (state->candidate.empty()) {
-                    state->reset();
-                } else {
-                    state->candidate.pop_back();
-                }
-            }
+            state->tracker.backspace();
             return;
         }
 
@@ -343,25 +330,16 @@ private:
             return;
         }
 
-        if (!state->active) {
-            if (character == config.prefix) {
-                state->active = true;
-                state->candidate.clear();
-            }
+        if (!state->tracker.type(config.prefix, character)) {
             return;
         }
 
-        if (character == config.prefix) {
-            state->candidate.clear();
-            return;
-        }
-
-        state->candidate.push_back(character);
-        const auto exact = config.entries.find(state->candidate);
+        const auto &candidate = state->tracker.candidate();
+        const auto exact = config.entries.find(candidate);
         if (exact != config.entries.end()) {
             state->suppressedRelease = event.key().sym();
             event.filterAndAccept();
-            eraseCommittedTrigger(inputContext, 1 + state->candidate.size() - 1);
+            eraseCommittedTrigger(inputContext, candidate.size());
             if (exact->second == secureMarker) {
                 launchSecureExpansion(exact->first, "run-typed-secure");
             } else {
@@ -369,10 +347,6 @@ private:
             }
             state->reset();
             return;
-        }
-
-        if (!hasPrefix(config, state->candidate)) {
-            state->reset();
         }
     }
 
